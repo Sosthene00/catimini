@@ -1,0 +1,19 @@
+[package]
+name = "catimini"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "catimini"
+crate-type = ["lib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bitcoin = { version = "0.30.0", features = [] }
+silentpayments = { git = "https://github.com/Sosthene00/rust-silentpayments.git", branch = "catimini" }
+
+[dev-dependencies]
+secp256k1 = {version = "0.27", features = ["bitcoin-hashes-std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
