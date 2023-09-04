@@ -9,8 +9,8 @@ use bitcoin::util::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::secp256k1::{Secp256k1, PublicKey, XOnlyPublicKey, Scalar};
 use bitcoin::hashes::{sha256, Hash};
 
-use silentpayments::*;
 use silentpayments::sending::{SilentPaymentAddress, generate_recipient_pubkeys};
+use silentpayments::receiving::{SilentPayment, Label, NULL_LABEL};
 
 #[derive(Debug)]
 pub enum Error {
@@ -511,7 +511,7 @@ mod tests {
         let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, true);
 
         let label = format!("{:064x}", 1);
-        let bob_address = bob_silent.0.get_receiving_addresses(vec![label]).unwrap();
+        let bob_address = bob_silent.0.get_receiving_address(Some(&label.try_into().unwrap())).unwrap();
         println!("{:?}", bob_address);
 
         // Alice sends Bob money from whatever transaction
@@ -567,7 +567,7 @@ mod tests {
         let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, false);
 
         // He gets his default address
-        let bob_address = bob_silent.0.get_receiving_addresses(vec![]).unwrap();
+        let bob_address = bob_silent.0.get_receiving_address(None).unwrap();
 
         // And send it to Alice so that she can pay him
         // Alice registers Bob as a fren
@@ -575,7 +575,7 @@ mod tests {
 
         // And adds his address
         let alice_label_for_bob = "bob's silent address";
-        bob.add_address(alice_label_for_bob.to_owned(), bob_address.get(&format!("{:064x}", 0)).unwrap().to_owned()).expect("Failed to add address to fren");
+        bob.add_address(alice_label_for_bob.to_owned(), bob_address).unwrap();
 
         // Alice now wants to pay Bob
         // She first create a builder with the right network
