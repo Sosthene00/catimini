@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::io::Write;
 
 use bitcoin::{OutPoint, Network};
-use bitcoin::bip32::{DerivationPath, ExtendedPrivKey};
+use bitcoin::util::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::secp256k1::{Secp256k1, PublicKey, XOnlyPublicKey, Scalar};
 use bitcoin::hashes::{sha256, Hash};
 
@@ -342,7 +342,7 @@ impl CatiminiSender {
             let mut bytes = [0u8;36];
 
             for outpoint in outpoints {
-                let txid: [u8;32] = outpoint.txid.to_byte_array();
+                let txid: [u8;32] = outpoint.txid.into_inner();
                 let vout: [u8;4] = outpoint.vout.to_le_bytes();
 
                 bytes[..32].copy_from_slice(&txid);
@@ -351,7 +351,7 @@ impl CatiminiSender {
             }
 
 
-            Ok(sha256::Hash::from_engine(engine).to_byte_array())
+            Ok(sha256::Hash::from_engine(engine).into_inner())
         }
 
         match self {
@@ -479,7 +479,7 @@ impl CatiminiReceiver {
 mod tests {
     use std::{str::FromStr, collections::{HashSet, HashMap}};
 
-    use bitcoin::{bip32::{ExtendedPrivKey, Error as Bip32Error}, Network, OutPoint, secp256k1::{SecretKey, PublicKey, Secp256k1}, Transaction};
+    use bitcoin::{util::bip32::{ExtendedPrivKey, Error as Bip32Error}, Network, OutPoint, secp256k1::{SecretKey, PublicKey, Secp256k1}};
     use bitcoin::hashes::hex::FromHex;
 
     use crate::{CatiminiSender, CatiminiReceiver, CatiminiFren, CatiminiAddress, SilentPaymentSender, SilentPaymentReceiver};
