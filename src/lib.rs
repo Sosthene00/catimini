@@ -17,6 +17,7 @@ pub enum Error {
     GenericError(String),
     SendingError(String),
     SilentPaymentError(silentpayments::Error),
+    SilentPaymentSendingError(String),
     InvalidProtocol(String),
     IOError(std::io::Error),
 }
@@ -234,12 +235,12 @@ impl SilentPaymentSender {
     fn is_valid(&self) -> Result<(), Error> {
         // if any of the recipients lacks a secret
         if let Some(r) = self.recipients.iter().find(|r| r.ecdh_shared_secret.is_none()) {
-            return Err(Error::SendingError(format!("Silent payment: Missing shared secret for recipients {}", r.address.to_string())));
+            return Err(Error::SilentPaymentSendingError(format!("Silent payment: Missing shared secret for recipients {}", r.address.to_string())));
         }
 
         // if we don't have any outpoints
         if self.outpoints.is_empty() {
-            return Err(Error::SendingError(format!("Silent payment: No outpoints")));
+            return Err(Error::SilentPaymentSendingError(format!("Silent payment: No outpoints")));
         }
 
         // All clear
