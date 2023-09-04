@@ -15,7 +15,7 @@ use silentpayments::receiving::{SilentPayment, Label, NULL_LABEL};
 #[derive(Debug)]
 pub enum Error {
     GenericError(String),
-    SendingError(String),
+    InvalidNetwork(String),
     SilentPaymentError(silentpayments::Error),
     SilentPaymentSendingError(String),
     InvalidProtocol(String),
@@ -414,8 +414,12 @@ pub struct PrivatePaymentReceiver;
 pub struct SilentPaymentReceiver(SilentPayment);
 
 impl SilentPaymentReceiver {
-    pub fn new(xprv: ExtendedPrivKey, is_testnet: bool) -> Self {
+    pub fn new(xprv: ExtendedPrivKey, is_testnet: bool) -> Result<Self, Error> {
         let secp = Secp256k1::new();
+
+        if xprv.network == Network::Bitcoin && is_testnet {
+            return Err(Error::InvalidNetwork(format!("Can't create receiver, xprv network is {} and is_testnet {}", xprv.network, is_testnet)));
+        }
 
         let scan_path = DerivationPath::from_str("m/352'/0'/0'/1'/0").expect("This shouldn't ever happen");
         let spend_path = DerivationPath::from_str("m/352'/0'/0'/0'/0").expect("This shouldn't ever happen");
@@ -423,9 +427,7 @@ impl SilentPaymentReceiver {
         let scan_key = xprv.derive_priv(&secp, &scan_path).expect("This shouldn't ever happen");
         let spend_key = xprv.derive_priv(&secp, &spend_path).expect("This shouldn't ever happen");
 
-        assert_eq!(format!("{}", scan_key.private_key.display_secret()), "0f694e068028a717f8af6b9411f9a133dd3565258714cc226594b34db90c1f2c");
-
-        Self {
+        Ok(Self {
             0: SilentPayment::new(
                 0, 
                 scan_key.private_key, 
