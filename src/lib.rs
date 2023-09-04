@@ -434,7 +434,47 @@ impl SilentPaymentReceiver {
                 spend_key.private_key, 
                 is_testnet
             ).expect("Couldn't create SilentPayment")
+        })
+    }
+
+    pub fn add_labels(&mut self, labels: Vec<String>) -> Result<Vec<String>, Error> {
+        let mut result: Vec<String> = vec![];
+        for label in labels {
+            let added = self.0.add_label(label.clone().try_into()?)?;
+            if added {
+                result.push(label);
+            }
         }
+
+        Ok(result)
+    }
+
+    pub fn get_address_no_label(&self) -> String {
+        self.0.get_receiving_address(None).expect("We should always have a no label address")
+    }
+
+    pub fn get_addresses_for_labels(&mut self, labels: Vec<String>) -> Result<HashMap<String, String>, Error> {
+        let known_labels = self.0.list_labels();
+        let mut result: HashMap<String, String> = HashMap::new();
+
+        for label in labels {
+            // If the label is not already known, add it.
+            if !known_labels.contains(&label.clone().try_into()?) {
+                self.0.add_label(label.clone().try_into()?)?; 
+            }
+
+            // Fetch the address for the label.
+            match self.0.get_receiving_address(Some(&label.clone().try_into()?)) {
+                Ok(address) => {
+                    result.insert(label, address);
+                },
+                Err(_) => {
+                    result.insert(label, "No valid keys for this label".to_owned());
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
 
