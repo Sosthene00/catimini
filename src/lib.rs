@@ -426,14 +426,15 @@ impl SilentPaymentReceiver {
         let secp = Secp256k1::new();
 
         if xprv.network == Network::Bitcoin && is_testnet {
-            return Err(Error::InvalidNetwork(format!("Can't create receiver, xprv network is {} and is_testnet {}", xprv.network, is_testnet)));
+            let e = format!("Can't create receiver, xprv network is {} and is_testnet {}", xprv.network, is_testnet);
+            return Err(Error::InvalidNetwork(e));
         }
 
-        let scan_path = DerivationPath::from_str("m/352'/0'/0'/1'/0").expect("This shouldn't ever happen");
-        let spend_path = DerivationPath::from_str("m/352'/0'/0'/0'/0").expect("This shouldn't ever happen");
+        let scan_path = DerivationPath::from_str("m/352'/0'/0'/1'/0")?;
+        let spend_path = DerivationPath::from_str("m/352'/0'/0'/0'/0")?;
 
-        let scan_key = xprv.derive_priv(&secp, &scan_path).expect("This shouldn't ever happen");
-        let spend_key = xprv.derive_priv(&secp, &spend_path).expect("This shouldn't ever happen");
+        let scan_key = xprv.derive_priv(&secp, &scan_path)?;
+        let spend_key = xprv.derive_priv(&secp, &spend_path)?;
 
         Ok(Self {
             0: SilentPayment::new(
@@ -457,32 +458,11 @@ impl SilentPaymentReceiver {
         Ok(result)
     }
 
-    pub fn get_address_no_label(&self) -> String {
-        self.0.get_receiving_address(None).expect("We should always have a no label address")
-    }
-
-    pub fn get_addresses_for_labels(&mut self, labels: Vec<String>) -> Result<HashMap<String, String>, Error> {
-        let known_labels = self.0.list_labels();
-        let mut result: HashMap<String, String> = HashMap::new();
-
-        for label in labels {
-            // If the label is not already known, add it.
-            if !known_labels.contains(&label.clone().try_into()?) {
-                self.0.add_label(label.clone().try_into()?)?; 
-            }
-
-            // Fetch the address for the label.
-            match self.0.get_receiving_address(Some(&label.clone().try_into()?)) {
-                Ok(address) => {
-                    result.insert(label, address);
-                },
-                Err(_) => {
-                    result.insert(label, "No valid keys for this label".to_owned());
-                }
-            }
-        }
-
-        Ok(result)
+    pub fn list_labels(&self) -> Vec<String> {
+        self.0.list_labels()
+            .into_iter()
+            .map(|l| l.as_string())
+            .collect()
     }
 }
 
@@ -493,6 +473,10 @@ pub enum CatiminiReceiver {
 }
 
 impl CatiminiReceiver {
+    pub fn new_sp(sp: SilentPaymentReceiver) -> Self {
+        Self::SilentPayment(sp)
+    }
+
     pub fn get_protocol(&self) -> &str {
         match self {
             CatiminiReceiver::Bip47(_) => "bip47",
@@ -501,22 +485,55 @@ impl CatiminiReceiver {
         }
     }
 
-    // pub fn silent_payment_derive_receive_keys(self) -> Result<HashMap<Label, Vec<SecretKey>>, Error> {
-        // match self {
-        //     CatiminiReceiver::SilentPayment(b) => {
-        //         let res = create_outputs(b.outpoints, b.recipients)?;
-        //         Ok(res)
-        //     },
-        //     _ => {
-        //         let e = format!(
-        //             "Tried to create a sender out of the wrong protocol: expected SilentPayment, got {}", 
-        //             self.get_protocol()
-        //         );
-        //         Err(Error::InvalidProtocol(e))
-        //     }
-        // }
-    //     unimplemented!();
-    // }
+    pub fn silent_payment_get_address_no_label(&self) -> Result<String, Error> {
+        match self {
+            CatiminiReceiver::SilentPayment(b) => {
+                Ok(b.0.get_receiving_address(None).expect("We should always have a no label address"))
+            },
+            _ => { 
+                Err(Error::InvalidProtocol(format!("Expected Silent Payment, got {}", self.get_protocol()))) 
+            }
+        }
+    }
+
+    pub fn silent_payment_get_addresses(&mut self) -> Result<HashMap<String, String>, Error> {
+        match self {
+            CatiminiReceiver::SilentPayment(b) => {
+                let labels = b.0.list_labels();
+                let mut result: HashMap<String, String> = HashMap::new();
+
+                for label in labels {
+                    // Fetch the address for the label.
+                    match b.0.get_receiving_address(Some(&label)) {
+                        Ok(address) => {
+                            result.insert(label.as_string(), address);
+                        },
+                        Err(_) => {
+                            result.insert(label.as_string(), "No valid keys for this label".to_owned());
+                        }
+                    }
+                }
+
+                Ok(result)
+            }
+            _ => { 
+                Err(Error::InvalidProtocol(format!("Expected Silent Payment, got {}", self.get_protocol()))) 
+            }
+        }
+    }
+
+    pub fn silent_payment_derive_receive_keys(&mut self, tweak_data: PublicKey, candidate_pubkeys: Vec<XOnlyPublicKey>) -> Result<HashMap<Label, HashSet<SecretKey>>, Error> 
+    {
+        match self {
+            CatiminiReceiver::SilentPayment(b) => {
+                let result = b.0.scan_transaction(&tweak_data, candidate_pubkeys)?;
+                Ok(result)
+            }
+            _ => { 
+                return Err(Error::InvalidProtocol(format!("Expected Silent Payment, got {}", self.get_protocol())));
+            }
+        }
+    }
 
     pub fn bip47_derive_receive_keys(self, start: u32, end: u32) -> Box<dyn Fn(u32, u32) -> Result<PublicKey, Error>> {
         unimplemented!();
@@ -558,7 +575,7 @@ mod tests {
     fn new_sp_receiver() {
         // wpkh(tprv8ZgxMBicQKsPdFqK4WfjWAFWHwB8PcAeoUvw3ELgLBXuaW4H1R2Ryd2Wsn237ouWxaTRHfakZor9cvQGu9zf6krEgjjPZCUvRkLhYR8DH3x/84'/1'/0'/0/*)#0xggqz9c
         let bob_xprv = new_receiver().unwrap();
-        let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, true);
+        let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, true).unwrap();
 
         let label = format!("{:064x}", 1);
         let bob_address = bob_silent.0.get_receiving_address(Some(&label.try_into().unwrap())).unwrap();
@@ -614,7 +631,7 @@ mod tests {
 
         // Our story begin with Bob creating a sp wallet
         let bob_xprv = new_master_from_seed(&format!("{}", "f00dbabe")).unwrap(); 
-        let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, false);
+        let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, false).unwrap();
 
         // He gets his default address
         let bob_address = bob_silent.0.get_receiving_address(None).unwrap();
