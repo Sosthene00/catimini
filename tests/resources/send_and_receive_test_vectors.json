@@ -58,7 +58,10 @@
                     "bip32_seed": "f00dbabe",
                     "scan_privkey": "0f694e068028a717f8af6b9411f9a133dd3565258714cc226594b34db90c1f2c",
                     "spend_privkey": "9d6ad855ce3417ef84e836892e5a56392bfba05fa5d97ccea30e266f540e08b3",
-                    "labels": {}
+                    "labels": {},
+                    "outputs": [
+                        "39a1e5ff6206cd316151b9b34cee4f80bb48ce61adee0a12ce7ff05ea436a1d9"
+                    ]
                 },
                 "expected": {
                     "outputs": {

@@ -1,5 +1,4 @@
 #![allow(non_snake_case)]
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use serde_json::from_str;
 
@@ -26,13 +25,14 @@ pub struct ReceivingDataGiven {
     pub scan_privkey: String,
     pub spend_privkey: String,
     pub labels: HashMap<String, String>,
+    pub outputs: Vec<String>,
 }
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct OutputWithSignature {
-    pubkey: String,
-    signature: String
+    pub pubkey: String,
+    pub signature: String
 
 }
 

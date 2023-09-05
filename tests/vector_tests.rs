@@ -3,15 +3,24 @@ mod common;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashSet, HashMap};
+    use std::str::FromStr;
 
-    use bitcoin::{OutPoint, Network};
+    use bitcoin::Network;
 
-    use catimini::{CatiminiSender, SilentPaymentSender, CatiminiAddress, SilentPaymentReceiver};
+    use bitcoin::util::bip32::ExtendedPrivKey;
+
+    use bitcoin::hashes::hex::FromHex;
+
+    use bitcoin::secp256k1::{SecretKey, Secp256k1};
+
+    use catimini::{CatiminiSender, SilentPaymentSender, CatiminiAddress, SilentPaymentReceiver, CatiminiReceiver};
+    use silentpayments::receiving::NULL_LABEL;
+    use silentpayments::sending::SilentPaymentAddress;
 
     use crate::{
-        common::input,
-        common::Signer,
+        common::{input, utils::decode_input_pub_keys},
+        common::{Signer, utils::{calculate_tweak_data_for_recipient, decode_outputs_to_check}},
         common::utils::{decode_outpoints, decode_priv_keys},
     };
 
@@ -50,11 +59,11 @@ mod tests {
             let network = Network::Bitcoin;
             let mut new_silent_payment = SilentPaymentSender::new(network);
 
-            let signer = Signer::new(decode_priv_keys(&given.input_privkeys));
+            let signer = Signer::new(decode_priv_keys(&given.input_privkeys), HashMap::new());
 
             let outpoints = decode_outpoints(&given.outpoints);
 
-            new_silent_payment.add_outpoints(outpoints);
+            new_silent_payment.add_outpoints(outpoints.into_iter().collect());
 
             new_silent_payment.add_addresses(silent_addresses).unwrap();
 
@@ -90,57 +99,78 @@ mod tests {
             }
         }
 
-        // for receivingtest in test_case.receiving {
-        //     let given = receivingtest.given;
-        //     let mut expected = receivingtest.expected;
+        for receivingtest in test_case.receiving {
+            let given = receivingtest.given;
+            let mut expected = receivingtest.expected;
 
-        //     let (b_scan, b_spend, _, B_spend) =
-        //         get_testing_silent_payment_key_pair(&given.bip32_seed);
+            // 1. Create a new silent payment receiver
+            let xprv = ExtendedPrivKey::new_master(Network::Bitcoin, &Vec::from_hex(&given.bip32_seed).unwrap()).unwrap();
+            let mut sp_receiver = SilentPaymentReceiver::new(xprv.clone(), false).unwrap();
 
-        //     // 1. Create a new receiver
-        //     // let mut sp_receiver = SilentPayment::new(0, b_scan, b_spend, IS_TESTNET).unwrap();
-        //     let sp = SilentPayment::new(0, b_scan, b_spend, IS_TESTNET).unwrap();
+            // 2. Register labels and create the catimi receiver for those labels
+            let labels: Vec<String> = given.labels.iter().map(|(_, label)| label.to_owned()).collect();
 
-        //     let mut sp_receiver = SilentPaymentReceiver::new_from_sp(sp);
+            sp_receiver.add_labels(labels).unwrap();
 
+            let mut catimi_receiver = CatiminiReceiver::new_sp(sp_receiver);
 
-        //     let labels = given.labels.iter().map(|l| l.1.to_owned()).collect();
+            // 3. get the silent addresses
+            let mut receiving_addresses = catimi_receiver.silent_payment_get_addresses().unwrap();
+            receiving_addresses.insert(NULL_LABEL.as_string(), catimi_receiver.silent_payment_get_address_no_label().unwrap());
 
-        //     // 2. Register labels and take silent addresses
-        //     let receiving_addresses = sp_receiver.0.get_receiving_addresses(labels).unwrap();
+            let set1: HashSet<_> = receiving_addresses.iter().map(|r| r.1).collect();
+            let set2: HashSet<_> = expected.outputs.keys().collect();
 
-        //     let set1: HashSet<_> = receiving_addresses.iter().map(|r| r.1).collect();
-        //     let set2: HashSet<_> = expected.addresses.iter().collect();
+            assert_eq!(set1, set2);
 
-        //     assert_eq!(set1, set2);
+            // 4. Check a tweak with some pubkeys from a transaction
+            // First get the outpoints and keys
+            let outpoints = decode_outpoints(&given.outpoints);
+            let input_pubkeys = decode_input_pub_keys(&given.input_pubkeys);
+            let output_keys = decode_outputs_to_check(&given.outputs);
+            let no_label_address: SilentPaymentAddress = receiving_addresses.get(&NULL_LABEL.as_string()).unwrap().to_owned().try_into().unwrap();
 
-        //     // can be even or odd !
-        //     assert_eq!(got_outputs, given.outputs); // Actually I think this is kind of redundant, we already checked that the outputs were ok sender side
+            // then the tweak
+            let tweak_data = calculate_tweak_data_for_recipient(&input_pubkeys, &outpoints);
+
+            // now check the provided keys for matches
+            let got_outputs = catimi_receiver.silent_payment_derive_receive_keys(tweak_data, output_keys).unwrap();
 
             // 3. check a transaction for outputs that belong to us
             // We obtain a map of labels to 1 or n private keys
-            // let add_to_wallet = sp_receiver.scan_for_outputs(
-            //     outpoints.clone(),
-            //     given.input_pub_keys,
-            //     outputs_to_check,
-            // ).unwrap();
+            // It is easy to derive the pubkey and map each returned private key to an output
+            let privkeys: HashMap<SilentPaymentAddress, Vec<SecretKey>> = got_outputs
+                .iter()
+                .flat_map(|(label, list)| {
+                    let privkeys: Vec<SecretKey> = list
+                        .into_iter()
+                        .map(|l| *l)
+                        .collect();
+                    let address: SilentPaymentAddress = receiving_addresses.get(&label.as_string()).unwrap().as_str().try_into().unwrap();
+                    let mut map = HashMap::new();
+                    map.insert(address, privkeys);
+                    map
+                })
+                .collect();
 
-            // // It is easy to derive the pubkey and map each returned private key to an output
-            // let privkeys: Vec<SecretKey> = add_to_wallet.iter().flat_map(|(_, list)| {
-            //     let mut ret: Vec<SecretKey> = vec![];
-            //     for l in list {
-            //         ret.push(SecretKey::from_str(l).unwrap());
-            //     }
-            //     ret
-            // })
-            // .collect();
+            let signer = Signer::new(vec![], privkeys);
+            let msg = "message".to_owned();
 
-            // let mut res = verify_and_calculate_signatures(privkeys, b_spend).unwrap();
+            let res = signer.sign_msg(&msg).unwrap();
 
-            // res.sort_by_key(|output| output.pub_key.clone());
-            // expected.outputs.sort_by_key(|output| output.pub_key.clone());
+            for (address, sigs) in res.iter() {
+                for s in sigs {
+                    match Signer::verify_sig(&s.signature, &msg, &s.pubkey) {
+                        true => continue,
+                        false => {
+                            let e = format!("Wrong signature for {}", address);
+                            panic!("{}", e);
+                        }
+                    }
+                }
+            }
 
-            // assert_eq!(res, expected.outputs);
-        // }
+            assert_eq!(res, expected.outputs);
+        }
     }
 }

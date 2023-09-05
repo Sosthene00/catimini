@@ -1,9 +1,12 @@
-use std::{collections::HashSet, fs::File, io::{Read, Write}, str::FromStr};
+use std::collections::BTreeSet;
+use std::{io::Write, str::FromStr};
 
-use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey, hashes::{sha256, Hash}, Scalar, Parity};
+use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256;
+use bitcoin::secp256k1::{PublicKey, SecretKey, XOnlyPublicKey, Parity, Secp256k1, Scalar};
 use bitcoin::{OutPoint, Txid};
 
-pub fn decode_outpoints(outpoints: &Vec<(String, u32)>) -> Vec<OutPoint> {
+pub fn decode_outpoints(outpoints: &Vec<(String, u32)>) -> BTreeSet<OutPoint> {
     outpoints
         .iter()
         .map(|(txid_str, vout)| OutPoint {
@@ -14,7 +17,7 @@ pub fn decode_outpoints(outpoints: &Vec<(String, u32)>) -> Vec<OutPoint> {
 }
 
 pub fn decode_priv_keys(input_priv_keys: &Vec<(String, bool)>) -> Vec<SecretKey> {
-    let secp = secp256k1::Secp256k1::new();
+    let secp = Secp256k1::new();
     input_priv_keys
         .iter()
         .map(|(keystr, x_only)| {
@@ -35,7 +38,7 @@ pub fn decode_input_pub_keys(input_pub_keys: &Vec<String>) -> Vec<PublicKey> {
             Err(_) => {
                 // we always assume even pairing for input public keys if they are omitted
                 let x_only_public_key = XOnlyPublicKey::from_str(&x).unwrap();
-                PublicKey::from_x_only_public_key(x_only_public_key, secp256k1::Parity::Even)
+                PublicKey::from_x_only_public_key(x_only_public_key, Parity::Even)
             }
         })
         .collect()
@@ -56,14 +59,14 @@ pub fn decode_recipients(recipients: &Vec<(String, f32)>) -> Vec<String> {
 }
 
 pub fn get_a_sum_secret_keys(input: &Vec<(SecretKey, bool)>) -> SecretKey {
-    let secp = secp256k1::Secp256k1::new();
+    let secp = Secp256k1::new();
 
     let mut negated_keys: Vec<SecretKey> = vec![];
 
     for (key, is_xonly) in input {
         let (_, parity) = key.x_only_public_key(&secp);
 
-        if *is_xonly && parity == secp256k1::Parity::Odd {
+        if *is_xonly && parity == Parity::Odd {
             negated_keys.push(key.negate());
         } else {
             negated_keys.push(key.clone());
@@ -77,4 +80,38 @@ pub fn get_a_sum_secret_keys(input: &Vec<(SecretKey, bool)>) -> SecretKey {
         .fold(*head, |acc, &item| acc.add_tweak(&item.into()).unwrap());
 
     result
+}
+
+pub fn get_A_sum_public_keys(input: &Vec<PublicKey>) -> PublicKey {
+    let keys_refs: &Vec<&PublicKey> = &input.iter().collect();
+
+    PublicKey::combine_keys(keys_refs).unwrap()
+}
+
+fn get_outpoints_hash(outpoints: BTreeSet<OutPoint>) -> [u8;32] {
+    let mut engine = sha256::HashEngine::default();
+    let mut bytes = [0u8;36];
+
+    for outpoint in outpoints {
+        let txid: [u8;32] = outpoint.txid.into_inner();
+        let vout: [u8;4] = outpoint.vout.to_le_bytes();
+
+        bytes[..32].copy_from_slice(&txid);
+        bytes[32..].copy_from_slice(&vout);
+        engine.write_all(&bytes);
+    }
+
+
+    sha256::Hash::from_engine(engine).into_inner()
+}
+
+pub fn calculate_tweak_data_for_recipient(
+    input_pub_keys: &Vec<PublicKey>,
+    outpoints: &BTreeSet<OutPoint>,
+) -> PublicKey {
+    let secp = Secp256k1::new();
+    let A_sum = get_A_sum_public_keys(input_pub_keys);
+    let outpoints_hash = Scalar::from_be_bytes(get_outpoints_hash(outpoints.clone())).unwrap();
+
+    A_sum.mul_tweak(&secp, &outpoints_hash).unwrap()
 }

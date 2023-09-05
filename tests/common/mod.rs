@@ -1,23 +1,32 @@
 use std::collections::HashMap;
-use secp256k1::{SecretKey, PublicKey, Message, hashes::Hash, Scalar};
-use silentpayments::structs::OutputWithSignature;
+use std::str::FromStr;
+use bitcoin::XOnlyPublicKey;
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::{SecretKey, PublicKey, Message, hashes, Scalar, Secp256k1, Error, Parity};
+use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::util::bip32::ExtendedPrivKey;
+use silentpayments::receiving::{SilentPayment, NULL_LABEL};
+use silentpayments::sending::SilentPaymentAddress;
+use crate::common::input::OutputWithSignature;
 
 pub mod utils;
 pub mod input;
 
 pub struct Signer {
-    privkeys: Vec<SecretKey>
+    privkeys: Vec<SecretKey>,
+    sp_privkeys: HashMap<SilentPaymentAddress, Vec<SecretKey>>
 }
 
 impl Signer {
-    pub fn new(privkeys: Vec<SecretKey>) -> Self {
+    pub fn new(privkeys: Vec<SecretKey>, sp_privkeys: HashMap<SilentPaymentAddress, Vec<SecretKey>>) -> Self {
         Self {
-            privkeys
+            privkeys,
+            sp_privkeys
         }
     }
 
     pub fn compute_ecdh_shared_secret(&self, B_scan: Vec<PublicKey>) -> HashMap<PublicKey, PublicKey> {
-        let secp = secp256k1::Secp256k1::new();
+        let secp = Secp256k1::new();
 
         let mut to_add = self.privkeys.clone();
         let combined_key = to_add.pop().unwrap();
@@ -33,36 +42,70 @@ impl Signer {
         dh
     }
 
-    pub fn verify_and_calculate_signatures(
-        privkeys: Vec<SecretKey>,
-        b_spend: SecretKey,
-    ) -> Result<Vec<OutputWithSignature>, secp256k1::Error> {
-        let secp = secp256k1::Secp256k1::new();
+    pub fn sign_msg(
+        &self,
+        // xprv: ExtendedPrivKey,
+        msg: &str
+    ) -> Result<HashMap<String, Vec<OutputWithSignature>>, Error> {
+        fn get_silent_payment(xprv: ExtendedPrivKey) -> (SilentPayment, SecretKey, SecretKey) {
+            let secp = Secp256k1::new();
 
-        let msg = Message::from_hashed_data::<secp256k1::hashes::sha256::Hash>(b"message");
-        let aux = secp256k1::hashes::sha256::Hash::hash(b"random auxiliary data").to_byte_array();
+            let scan_path = bitcoin::util::bip32::DerivationPath::from_str("m/352'/0'/0'/1'/0").expect("This shouldn't ever happen");
+            let spend_path = bitcoin::util::bip32::DerivationPath::from_str("m/352'/0'/0'/0'/0").expect("This shouldn't ever happen");
 
-        let mut res: Vec<OutputWithSignature> = vec![];
-        for mut k in privkeys {
-            let (P, parity) = k.x_only_public_key(&secp);
-            let tweak = k.add_tweak(&Scalar::from_be_bytes(b_spend.negate().secret_bytes()).unwrap())?;
+            let scan_key = xprv.derive_priv(&secp, &scan_path).expect("This shouldn't ever happen");
+            let spend_key = xprv.derive_priv(&secp, &spend_path).expect("This shouldn't ever happen");
 
-            if parity == secp256k1::Parity::Odd {
-                k = k.negate();
+            (SilentPayment::new(
+                0, 
+                scan_key.private_key, 
+                spend_key.private_key, 
+                false
+            ).expect("Couldn't create SilentPayment"), scan_key.private_key, spend_key.private_key)
+        }
+
+        let secp = Secp256k1::new();
+
+        let msg_hash = Message::from_hashed_data::<hashes::sha256::Hash>(msg.as_bytes());
+        let aux = hashes::sha256::Hash::hash(b"random auxiliary data").into_inner();
+
+        // let (sp, scan_key, spend_key) = get_silent_payment(xprv);
+
+        let mut res: HashMap<String, Vec<OutputWithSignature>> = HashMap::new();
+
+        for (sp_address, v) in self.sp_privkeys.iter() {
+            let mut signatures: Vec<OutputWithSignature> = vec![];
+            for privkey in v {
+                let (P, parity) = privkey.x_only_public_key(&secp);
+
+                let mut negated_privkey = privkey.clone();
+                if parity == Parity::Odd {
+                    negated_privkey = negated_privkey.negate();
+                }
+
+                let sig = secp.sign_schnorr_with_aux_rand(&msg_hash, &privkey.keypair(&secp), &aux);
+
+                signatures.push(OutputWithSignature {
+                    pubkey: P.to_string(),
+                    signature: sig.to_string(), 
+                });
             }
-
-            let sig = secp.sign_schnorr_with_aux_rand(&msg, &k.keypair(&secp), &aux);
-
-            secp.verify_schnorr(&sig, &msg, &P)?;
-
-
-            res.push(OutputWithSignature {
-                pub_key: P.to_string(),
-                priv_key_tweak: format!("{}", tweak.display_secret()),
-                signature: sig.to_string(),
-            });
+            let address = sp_address.clone();
+            res.insert(address.into(), signatures);
         }
         Ok(res)
     }
 
+    pub fn verify_sig(sig: &str, msg: &str, pubkey: &str) -> bool {
+        let secp = Secp256k1::new();
+
+        let xpubkey = XOnlyPublicKey::from_str(pubkey).unwrap();
+        let msg_hash = Message::from_hashed_data::<hashes::sha256::Hash>(msg.as_bytes());
+        let aux = hashes::sha256::Hash::hash(b"random auxiliary data").into_inner();
+
+        match secp.verify_schnorr(&Signature::from_str(sig).unwrap(), &msg_hash, &xpubkey) {
+            Ok(_) => true,
+            Err(_) => false
+        }
+    }
 }
