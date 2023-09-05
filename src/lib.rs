@@ -6,7 +6,7 @@ use std::io::Write;
 
 use bitcoin::{OutPoint, Network};
 use bitcoin::util::bip32::{DerivationPath, ExtendedPrivKey};
-use bitcoin::secp256k1::{Secp256k1, PublicKey, XOnlyPublicKey, Scalar};
+use bitcoin::secp256k1::{Secp256k1, PublicKey, SecretKey, XOnlyPublicKey, Scalar};
 use bitcoin::hashes::{sha256, Hash};
 
 use silentpayments::sending::{SilentPaymentAddress, generate_recipient_pubkeys};
@@ -18,8 +18,10 @@ pub enum Error {
     InvalidNetwork(String),
     SilentPaymentError(silentpayments::Error),
     SilentPaymentSendingError(String),
+    SilentPaymentInvalidLabels(Vec<String>),
     InvalidProtocol(String),
     IOError(std::io::Error),
+    Bip32Error(bitcoin::util::bip32::Error),
 }
 
 impl From<silentpayments::Error> for Error {
@@ -31,6 +33,12 @@ impl From<silentpayments::Error> for Error {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::IOError(e)
+    }
+}
+
+impl From<bitcoin::util::bip32::Error> for Error {
+    fn from(e: bitcoin::util::bip32::Error) -> Self {
+        Error::Bip32Error(e)
     }
 }
 
