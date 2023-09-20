@@ -1,3 +1,5 @@
+pub mod error;
+
 use core::fmt;
 use std::collections::{HashSet, HashMap, BTreeSet};
 use std::vec;
@@ -11,35 +13,7 @@ use silentpayments::sending::{SilentPaymentAddress, generate_multiple_recipient_
 use silentpayments::receiving::{Receiver, Label, NULL_LABEL};
 use silentpayments::utils::hash_outpoints;
 
-#[derive(Debug)]
-pub enum Error {
-    GenericError(String),
-    InvalidNetwork(String),
-    SilentPaymentError(silentpayments::Error),
-    SilentPaymentSendingError(String),
-    SilentPaymentInvalidLabels(Vec<String>),
-    InvalidProtocol(String),
-    IOError(std::io::Error),
-    Bip32Error(bitcoin::util::bip32::Error),
-}
-
-impl From<silentpayments::Error> for Error {
-    fn from(e: silentpayments::Error) -> Self {
-        Error::SilentPaymentError(e)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::IOError(e)
-    }
-}
-
-impl From<bitcoin::util::bip32::Error> for Error {
-    fn from(e: bitcoin::util::bip32::Error) -> Self {
-        Error::Bip32Error(e)
-    }
-}
+use error::Error;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum CatiminiAddress {
