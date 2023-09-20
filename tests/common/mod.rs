@@ -5,10 +5,10 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{SecretKey, PublicKey, Message, hashes, Scalar, Secp256k1, Error, Parity};
 use bitcoin::secp256k1::schnorr::Signature;
 use silentpayments::sending::SilentPaymentAddress;
-use crate::common::input::OutputWithSignature;
+use crate::common::structs::OutputWithSignature;
 
 pub mod utils;
-pub mod input;
+pub mod structs;
 
 pub struct Signer {
     privkeys: Vec<(SecretKey, bool)>,

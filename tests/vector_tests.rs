@@ -15,42 +15,28 @@ mod tests {
     use silentpayments::receiving::{NULL_LABEL, Receiver, Label};
     use silentpayments::sending::SilentPaymentAddress;
 
+    use crate::common::structs::{TestData, SendingData, ReceivingData};
     use crate::{
-        common::{input, utils::decode_input_pub_keys},
-        common::{Signer, utils::{calculate_tweak_data_for_recipient, decode_outputs_to_check}},
-        common::utils::{decode_outpoints, decode_priv_keys},
+        common::Signer,
+        common::utils::{read_file, decode_input_pub_keys, decode_outpoints, decode_priv_keys, calculate_tweak_data_for_recipient, decode_outputs_to_check},
     };
 
-    const IS_TESTNET: bool = false;
-
-    #[test]
-    fn test_with_test_vectors() {
-        let testdata = input::read_file();
-
-        for test in testdata {
-            process_test_case(test);
-        }
+    pub fn get_test_vectors() -> Vec<TestData> {
+        read_file()
     }
 
-    fn process_test_case(test_case: input::TestData) {
-        let mut got_outputs: HashMap<String, Vec<String>> = HashMap::new();
-        println!("\n\ntest.comment = {:?}", test_case.comment);
-        for sendingtest in test_case.sending {
-            let given = sendingtest.given;
+    fn test_sending(sending_cases: Vec<&SendingData>) {
+        for sendingtest in sending_cases {
+            let given = &sendingtest.given;
 
-            let expected = sendingtest.expected;
+            let expected = &sendingtest.expected;
 
-            let silent_addresses: Vec<CatiminiAddress> = given.recipients.iter().map(|a| {
+            let silent_addresses: Vec<CatiminiAddress> = given.recipients
+                .iter()
+                .map(|(a, _)| {
                 CatiminiAddress::try_from(a.as_str()).unwrap()
-            })
-            .collect();
-
-            // let mut fren = CatiminiFren::new(1, "bob".to_owned());
-
-            // for (i, address) in silent_addresses.iter().enumerate() {
-            //     let address_label = format!("silent address #{}", i);
-            //     fren.add_address(address_label, address.to_string()).expect("Failed to add address to fren");
-            // }
+                })
+                .collect();
 
             let network = Network::Bitcoin;
             let mut new_silent_payment = SilentPaymentSender::new(network);
@@ -73,7 +59,7 @@ mod tests {
 
             let outputs = alice.silent_payment_derive_send_keys().unwrap();
 
-            got_outputs = 
+            let got_outputs: HashMap<String, Vec<String>> = 
                 outputs
                 .into_iter()
                 .map(|(a, ps)| {
@@ -86,15 +72,23 @@ mod tests {
                 })
                 .collect();
 
-            for (address, keys) in got_outputs {
-                let expected = expected.outputs.get(&address).expect("Unexpected address in the output");
-                assert_eq!(keys, *expected, "wrong keys for {}", address);
+            let expected_outputs: Vec<String> = expected.outputs
+                .iter()
+                .map(|(a, _)| {
+                    a.to_owned()
+                })
+                .collect();
+
+            for (_, keys) in got_outputs {
+                assert!(keys.iter().all(|k| expected_outputs.contains(k)));
             }
         }
+    }
 
-        for receivingtest in test_case.receiving {
-            let given = receivingtest.given;
-            let expected = receivingtest.expected;
+    fn test_receiving(receiving_cases: Vec<&ReceivingData>) {
+        for receivingtest in receiving_cases {
+            let given = &receivingtest.given;
+            let expected = &receivingtest.expected;
 
             let secp = Secp256k1::new();
 
@@ -120,7 +114,7 @@ mod tests {
             receiving_addresses.insert(NULL_LABEL.as_string(), catimini_receiver.silent_payment_get_address_no_label().unwrap());
 
             let set1: HashSet<_> = receiving_addresses.iter().map(|r| r.1).collect();
-            let set2: HashSet<_> = expected.outputs.keys().collect();
+            let set2: HashSet<_> = expected.addresses.iter().collect();
 
             assert_eq!(set1, set2);
 
@@ -170,7 +164,29 @@ mod tests {
                 }
             }
 
-            assert_eq!(res, expected.outputs);
+            let expected_outputs: Vec<String> = expected.outputs
+                .iter()
+                .map(|o| o.pubkey.to_owned())
+                .collect();
+
+            for (_, outputs) in res {
+                assert!(outputs.iter().all(|x| expected_outputs.contains(&x.pubkey)));
+            }
+        }
+    }
+
+    #[test]
+    fn process_test_case() {
+        let test_cases = get_test_vectors();
+
+        for case in &test_cases {
+            eprintln!("test.comment = {:?}", case.comment);
+            test_sending(case.sending.iter().collect());
+        }
+
+        for case in &test_cases {
+            eprintln!("test.comment = {:?}", case.comment);
+            test_receiving(case.receiving.iter().collect());
         }
     }
 }

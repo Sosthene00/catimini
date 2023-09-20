@@ -1,8 +1,7 @@
 #![allow(non_snake_case)]
 use serde::Deserialize;
-use serde_json::from_str;
 
-use std::{collections::HashMap, fs::File, io::Read};
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct TestData {
@@ -13,6 +12,7 @@ pub struct TestData {
 
 #[derive(Debug, Deserialize)]
 pub struct ReceivingData {
+    pub supports_labels: bool,
     pub given: ReceivingDataGiven,
     pub expected: ReceivingDataExpected,
 }
@@ -28,17 +28,10 @@ pub struct ReceivingDataGiven {
     pub outputs: Vec<String>,
 }
 
-
-#[derive(Debug, Deserialize, PartialEq)]
-pub struct OutputWithSignature {
-    pub pubkey: String,
-    pub signature: String
-
-}
-
 #[derive(Debug, Deserialize)]
 pub struct ReceivingDataExpected {
-    pub outputs: HashMap<String, Vec<OutputWithSignature>>,
+    pub addresses: Vec<String>,
+    pub outputs: Vec<OutputWithSignature>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,17 +44,16 @@ pub struct SendingData {
 pub struct SendingDataGiven {
     pub outpoints: Vec<(String, u32)>,
     pub input_privkeys: Vec<(String, bool)>,
-    pub recipients: Vec<String>,
+    pub recipients: Vec<(String, f32)>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SendingDataExpected {
-    pub outputs: HashMap<String, Vec<String>>,
+    pub outputs: Vec<(String, f32)>,
 }
 
-pub fn read_file() -> Vec<TestData> {
-    let mut file = File::open("tests/resources/send_and_receive_test_vectors.json").unwrap();
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).unwrap();
-    from_str(&contents).unwrap()
+#[derive(Debug, Deserialize, Eq, PartialEq, Clone)]
+pub struct OutputWithSignature {
+    pub pubkey: String,
+    pub signature: String,
 }

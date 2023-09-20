@@ -1,10 +1,20 @@
 use std::collections::BTreeSet;
-use std::{io::Write, str::FromStr};
+use std::{io::Write, io::Read, str::FromStr, fs::File};
 
 use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256;
 use bitcoin::secp256k1::{PublicKey, SecretKey, XOnlyPublicKey, Parity, Secp256k1, Scalar};
 use bitcoin::{OutPoint, Txid};
+use serde_json::from_str;
+
+use super::structs::TestData;
+
+pub fn read_file() -> Vec<TestData> {
+    let mut file = File::open("tests/resources/test_vectors.json").unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+    from_str(&contents).unwrap()
+}
 
 pub fn decode_outpoints(outpoints: &Vec<(String, u32)>) -> BTreeSet<OutPoint> {
     outpoints
