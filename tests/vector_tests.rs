@@ -5,17 +5,14 @@ mod common;
 mod tests {
     use std::collections::{HashSet, HashMap};
     use std::str::FromStr;
+    use std::vec;
 
     use bitcoin::Network;
 
-    use bitcoin::util::bip32::ExtendedPrivKey;
+    use bitcoin::secp256k1::{SecretKey, Secp256k1, Scalar};
 
-    use bitcoin::hashes::hex::FromHex;
-
-    use bitcoin::secp256k1::{SecretKey, Secp256k1};
-
-    use catimini::{CatiminiSender, SilentPaymentSender, CatiminiAddress, SilentPaymentReceiver, CatiminiReceiver};
-    use silentpayments::receiving::NULL_LABEL;
+    use catimini::{CatiminiSender, SilentPaymentSender, CatiminiAddress, CatiminiReceiver};
+    use silentpayments::receiving::{NULL_LABEL, Receiver, Label};
     use silentpayments::sending::SilentPaymentAddress;
 
     use crate::{
@@ -37,7 +34,6 @@ mod tests {
 
     fn process_test_case(test_case: input::TestData) {
         let mut got_outputs: HashMap<String, Vec<String>> = HashMap::new();
-        // let mut outpoints: Vec<OutPoint> = vec![];
         println!("\n\ntest.comment = {:?}", test_case.comment);
         for sendingtest in test_case.sending {
             let given = sendingtest.given;
@@ -67,14 +63,11 @@ mod tests {
 
             new_silent_payment.add_addresses(silent_addresses).unwrap();
 
-            let scan_pubkeys = new_silent_payment.get_scanpubkeys();
+            let tweak = new_silent_payment.get_outpoints_hash().unwrap();
 
-            let ecdh_keys = signer.compute_ecdh_shared_secret(scan_pubkeys.into_iter().collect()); // This is implemented by the signer
+            let tweak_data = signer.tweak_aggregated_keys(&tweak); // This is implemented by the signer
 
-            new_silent_payment.add_ecdh_keys(ecdh_keys).unwrap();
-
-            // check that there's no recipients without secret
-            assert!(new_silent_payment.get_empty_scanpubkeys().len() == 0);
+            new_silent_payment.add_tweak_data(tweak_data);
 
             let alice = CatiminiSender::new_sp(new_silent_payment).unwrap(); 
 
@@ -101,22 +94,30 @@ mod tests {
 
         for receivingtest in test_case.receiving {
             let given = receivingtest.given;
-            let mut expected = receivingtest.expected;
+            let expected = receivingtest.expected;
+
+            let secp = Secp256k1::new();
 
             // 1. Create a new silent payment receiver
-            let xprv = ExtendedPrivKey::new_master(Network::Bitcoin, &Vec::from_hex(&given.bip32_seed).unwrap()).unwrap();
-            let mut sp_receiver = SilentPaymentReceiver::new(xprv.clone(), false).unwrap();
+            let scan_privkey = SecretKey::from_str(&given.scan_privkey).unwrap();
+            let spend_privkey = SecretKey::from_str(&given.spend_privkey).unwrap();
+
+            let mut signer = Signer::new(vec![(scan_privkey, false), (spend_privkey, false)], HashMap::new());
+
+            let mut sp_receiver = Receiver::new(0, scan_privkey.public_key(&secp), spend_privkey.public_key(&secp), false).unwrap();
 
             // 2. Register labels and create the catimi receiver for those labels
             let labels: Vec<String> = given.labels.iter().map(|(_, label)| label.to_owned()).collect();
 
-            sp_receiver.add_labels(labels).unwrap();
+            for label in labels {
+                sp_receiver.add_label(label.try_into().unwrap()).unwrap();
+            }
 
-            let mut catimi_receiver = CatiminiReceiver::new_sp(sp_receiver);
+            let mut catimini_receiver = CatiminiReceiver::new_sp(sp_receiver);
 
             // 3. get the silent addresses
-            let mut receiving_addresses = catimi_receiver.silent_payment_get_addresses().unwrap();
-            receiving_addresses.insert(NULL_LABEL.as_string(), catimi_receiver.silent_payment_get_address_no_label().unwrap());
+            let mut receiving_addresses = catimini_receiver.silent_payment_get_addresses().unwrap();
+            receiving_addresses.insert(NULL_LABEL.as_string(), catimini_receiver.silent_payment_get_address_no_label().unwrap());
 
             let set1: HashSet<_> = receiving_addresses.iter().map(|r| r.1).collect();
             let set2: HashSet<_> = expected.outputs.keys().collect();
@@ -128,32 +129,31 @@ mod tests {
             let outpoints = decode_outpoints(&given.outpoints);
             let input_pubkeys = decode_input_pub_keys(&given.input_pubkeys);
             let output_keys = decode_outputs_to_check(&given.outputs);
-            let no_label_address: SilentPaymentAddress = receiving_addresses.get(&NULL_LABEL.as_string()).unwrap().to_owned().try_into().unwrap();
 
             // then the tweak
             let tweak_data = calculate_tweak_data_for_recipient(&input_pubkeys, &outpoints);
 
-            // now check the provided keys for matches
-            let got_outputs = catimi_receiver.silent_payment_derive_receive_keys(tweak_data, output_keys).unwrap();
+            let ecdh_shared_secret = signer.tweak_with_scan_key(tweak_data);
 
-            // 3. check a transaction for outputs that belong to us
-            // We obtain a map of labels to 1 or n private keys
-            // It is easy to derive the pubkey and map each returned private key to an output
-            let privkeys: HashMap<SilentPaymentAddress, Vec<SecretKey>> = got_outputs
-                .iter()
-                .flat_map(|(label, list)| {
-                    let privkeys: Vec<SecretKey> = list
-                        .into_iter()
-                        .map(|l| *l)
-                        .collect();
-                    let address: SilentPaymentAddress = receiving_addresses.get(&label.as_string()).unwrap().as_str().try_into().unwrap();
-                    let mut map = HashMap::new();
-                    map.insert(address, privkeys);
-                    map
+            // now check the provided keys for matches
+            let got_outputs: HashMap<Label, Vec<Scalar>> = catimini_receiver.silent_payment_derive_receive_keys(ecdh_shared_secret, output_keys).unwrap();
+
+            let addr_tweaks: HashMap<SilentPaymentAddress, Vec<Scalar>> = got_outputs
+                .into_iter()
+                .flat_map(|(l, s)| {
+                    let address = catimini_receiver
+                        .silent_payment_get_address_with_label(&l.as_string())
+                        .expect("This can't happen");
+                    let address = SilentPaymentAddress::try_from(address).unwrap();
+                    std::iter::once((address, s))
                 })
                 .collect();
 
-            let signer = Signer::new(vec![], privkeys);
+            signer.add_tweaks(addr_tweaks);
+
+            // 3. check a transaction for outputs that belong to us
+            // We obtain a map of labels to 1 or n tweaks
+            // It is easy to derive the pubkey and map each returned private key to an output
             let msg = "message".to_owned();
 
             let res = signer.sign_msg(&msg).unwrap();

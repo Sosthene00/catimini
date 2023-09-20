@@ -16,16 +16,11 @@ pub fn decode_outpoints(outpoints: &Vec<(String, u32)>) -> BTreeSet<OutPoint> {
         .collect()
 }
 
-pub fn decode_priv_keys(input_priv_keys: &Vec<(String, bool)>) -> Vec<SecretKey> {
-    let secp = Secp256k1::new();
+pub fn decode_priv_keys(input_priv_keys: &Vec<(String, bool)>) -> Vec<(SecretKey, bool)> {
     input_priv_keys
         .iter()
         .map(|(keystr, x_only)| {
-            let mut k = SecretKey::from_str(&keystr).unwrap();
-            if *x_only && k.x_only_public_key(&secp).1 == Parity::Odd {
-                k = k.negate();
-            }
-            k
+            (SecretKey::from_str(keystr).unwrap(), *x_only)
         })
         .collect()
 }
