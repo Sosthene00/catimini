@@ -2,15 +2,14 @@ use core::fmt;
 use std::collections::{HashSet, HashMap, BTreeSet};
 use std::vec;
 use std::str::FromStr;
-use std::io::Write;
 
 use bitcoin::{OutPoint, Network};
 use bitcoin::util::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::secp256k1::{Secp256k1, PublicKey, SecretKey, XOnlyPublicKey, Scalar};
-use bitcoin::hashes::{sha256, Hash};
 
-use silentpayments::sending::{SilentPaymentAddress, generate_recipient_pubkeys};
-use silentpayments::receiving::{SilentPayment, Label, NULL_LABEL};
+use silentpayments::sending::{SilentPaymentAddress, generate_multiple_recipient_pubkeys};
+use silentpayments::receiving::{Receiver, Label, NULL_LABEL};
+use silentpayments::utils::hash_outpoints;
 
 #[derive(Debug)]
 pub enum Error {
@@ -173,7 +172,6 @@ pub struct PrivatePaymentSender;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SilentPaymentRecipient {
     address: SilentPaymentAddress,
-    ecdh_shared_secret: Option<PublicKey>,
     nb_outputs: u32,
 }
 
@@ -181,33 +179,15 @@ impl SilentPaymentRecipient {
     fn new(address: SilentPaymentAddress) -> Self {
         Self {
             address,
-            ecdh_shared_secret: None,
             nb_outputs: 1
         }
-    }
-
-    fn get_scan_key(&self) -> PublicKey {
-        self.address.get_scan_key()
-    }
-
-    fn update_secret(&mut self, new_secret: PublicKey) {
-        self.ecdh_shared_secret = Some(new_secret);
-    }
-
-    fn update_nb_outputs(&mut self, nb_outputs: u32) -> Result<(), Error> {
-        if nb_outputs == 0 {
-            return Err(Error::GenericError(format!("Can't have 0 output")));
-        }
-
-        self.nb_outputs = nb_outputs;
-
-        Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SilentPaymentSender {
     outpoints: BTreeSet<OutPoint>,
+    tweak_data: Option<SecretKey>,
     recipients: Vec<SilentPaymentRecipient>,
     network: Network,
 }
@@ -222,7 +202,6 @@ impl fmt::Display for SilentPaymentSender {
         write!(f, "Sender has {} recipients: \n", self.recipients.len())?;
         for (i, r) in self.recipients.iter().enumerate() {
             write!(f, "\t#{}: {}\n", i, r.address)?;
-            write!(f, "\twith secret: {:?}\n", r.ecdh_shared_secret)?;
             write!(f, "\tand {} outputs\n", r.nb_outputs)?;
         }
 
@@ -234,6 +213,7 @@ impl SilentPaymentSender {
     pub fn new(network: Network) -> Self {
         Self { 
             outpoints: BTreeSet::new(), 
+            tweak_data: None,
             recipients: vec![],
             network,
         }
@@ -241,14 +221,14 @@ impl SilentPaymentSender {
 
     /// Do some basics sanity check over our list of recipients before computing the keys
     fn is_valid(&self) -> Result<(), Error> {
-        // if any of the recipients lacks a secret
-        if let Some(r) = self.recipients.iter().find(|r| r.ecdh_shared_secret.is_none()) {
-            return Err(Error::SilentPaymentSendingError(format!("Silent payment: Missing shared secret for recipients {}", r.address.to_string())));
-        }
-
         // if we don't have any outpoints
         if self.outpoints.is_empty() {
             return Err(Error::SilentPaymentSendingError(format!("Silent payment: No outpoints")));
+        }
+
+        // if we don't have the tweak_data
+        if self.tweak_data.is_none() {
+            return Err(Error::SilentPaymentSendingError(format!("Silent payment: no tweak data")));
         }
 
         // All clear
@@ -265,34 +245,38 @@ impl SilentPaymentSender {
         }
     }
 
+    pub fn get_outpoints_hash(&self) -> Result<Scalar, Error> {
+        let outpoints: Vec<[u8;36]> = self.outpoints
+            .iter()
+            .map(|o| {
+                let mut bytes = [0u8;36];
+                bytes[..32].copy_from_slice(&o.txid);
+                bytes[32..].copy_from_slice(&o.vout.to_le_bytes());
+                bytes 
+            })
+            .collect();
+        Ok(hash_outpoints(&outpoints)?)
+    }
+
+    pub fn add_tweak_data(&mut self, tweak: SecretKey) {
+        self.tweak_data = Some(tweak);
+    }
+
     pub fn add_addresses(&mut self, addresses: Vec<CatiminiAddress>) -> Result<(), Error> {
         for address in addresses {
             let silent_address: SilentPaymentAddress = address.try_into()?;
-            
-            // Is there already a recipient with this address?
-            if let Some(mut recipient) = self.get_recipient_from_address(silent_address) {
+
+            if let Some(pos) = self.recipients.iter().position(|r| r.address == silent_address) {
                 // we update the counter for this recipient
-                // TODO: This can be improve
-                let new_nb_outputs = recipient.nb_outputs + 1;
-                let old_recipient = recipient.clone();
-                recipient.update_nb_outputs(new_nb_outputs)?;
-                let index = self.recipients.iter().position(|r| *r == old_recipient).unwrap();
-                self.recipients.remove(index);
-                self.recipients.insert(index, recipient);
+                self.recipients[pos].nb_outputs = self.recipients[pos].nb_outputs.saturating_add(1);
             } else {
                 if (self.network != Network::Bitcoin) != silent_address.is_testnet() {
                     return Err(Error::GenericError(format!("Wrong network for address: {}", silent_address)));
                 }
-
                 self.recipients.push(SilentPaymentRecipient::new(silent_address));
             }
         }
-
         Ok(())
-    }
-
-    fn get_recipient_from_address(& self, address: SilentPaymentAddress) -> Option<SilentPaymentRecipient> {
-        self.recipients.iter().find(|r| r.address == address).copied()
     }
 
     pub fn get_scanpubkeys(&self) -> HashSet<PublicKey> {
@@ -301,27 +285,6 @@ impl SilentPaymentSender {
         .collect()
     }
 
-    pub fn get_empty_scanpubkeys(&self) -> HashSet<PublicKey> {
-        self.recipients.iter().filter(|r| {
-            r.ecdh_shared_secret.is_none()
-        })
-        .map(|r| r.address.get_scan_key())
-        .collect()
-    }
-
-    pub fn add_ecdh_keys(&mut self, ecdh_keys: HashMap<PublicKey, PublicKey>) -> Result<(), Error> {
-        for recipient in self.recipients.clone() {
-            if let Some(new_secret) = ecdh_keys.get(&recipient.get_scan_key()) {
-                let mut recipient_with_new_secret = recipient.clone();
-                recipient_with_new_secret.update_secret(*new_secret);
-                let index = self.recipients.iter().position(|r| *r == recipient).unwrap();
-                self.recipients.remove(index);
-                self.recipients.insert(index, recipient_with_new_secret);
-            }
-        }
-
-        Ok(())
-    }
 }
 
 pub enum CatiminiSender {
@@ -346,26 +309,8 @@ impl CatiminiSender {
     }
 
     pub fn silent_payment_derive_send_keys(self) -> Result<HashMap<String, Vec<XOnlyPublicKey>>, Error> {
-        fn get_outpoints_hash(outpoints: BTreeSet<OutPoint>) -> Result<[u8;32], Error> {
-            let mut engine = sha256::HashEngine::default();
-            let mut bytes = [0u8;36];
-
-            for outpoint in outpoints {
-                let txid: [u8;32] = outpoint.txid.into_inner();
-                let vout: [u8;4] = outpoint.vout.to_le_bytes();
-
-                bytes[..32].copy_from_slice(&txid);
-                bytes[32..].copy_from_slice(&vout);
-                engine.write_all(&bytes)?;
-            }
-
-
-            Ok(sha256::Hash::from_engine(engine).into_inner())
-        }
-
         match self {
             CatiminiSender::SilentPayment(b) => {
-                let secp = Secp256k1::new();
                 let recipients: Vec<String> = b.recipients.iter().flat_map(|r| {
                     let mut to_add: Vec<String> = vec![];
                     for _ in 0..r.nb_outputs {
@@ -374,26 +319,13 @@ impl CatiminiSender {
                     to_add
                 })
                 .collect();
-                let outpoints_hash = get_outpoints_hash(b.outpoints)?;
-                let secrets = b.recipients
-                    .into_iter()
-                    .map(|r| -> Result<(PublicKey, PublicKey), silentpayments::Error> {
-                        // tweak the secret with the outpoints hash
-                        let tweak = Scalar::from_be_bytes(outpoints_hash)?;
-                        if let Some(secret) = r.ecdh_shared_secret {
-                            let tweaked_secret = secret.mul_tweak(&secp, &tweak)?;
-                            Ok((r.address.get_scan_key(), tweaked_secret))
-                        } else {
-                            return Err(silentpayments::Error::InvalidSharedSecret(format!("Missing shared secret!"))); // This should never happen
-                        }
-                    });
 
-                let secrets: HashMap<PublicKey, PublicKey> = secrets
-                    .into_iter()
-                    .map(|r| r.unwrap())
-                    .collect();
+                let res = if let Some(tweak) = b.tweak_data {
+                    generate_multiple_recipient_pubkeys(recipients, tweak)?
+                } else {
+                    return Err(Error::SilentPaymentSendingError(format!("Missing tweak data")));
+                };
 
-                let res = generate_recipient_pubkeys(recipients, secrets)?;
                 Ok(res)
             },
             _ => {
@@ -419,7 +351,7 @@ pub struct Bip47Receiver;
 
 pub struct PrivatePaymentReceiver;
 
-pub struct SilentPaymentReceiver(SilentPayment);
+pub struct SilentPaymentReceiver(Receiver);
 
 impl SilentPaymentReceiver {
     pub fn new(xprv: ExtendedPrivKey, is_testnet: bool) -> Result<Self, Error> {
@@ -437,10 +369,10 @@ impl SilentPaymentReceiver {
         let spend_key = xprv.derive_priv(&secp, &spend_path)?;
 
         Ok(Self {
-            0: SilentPayment::new(
+            0: Receiver::new(
                 0, 
-                scan_key.private_key, 
-                spend_key.private_key, 
+                scan_key.private_key.public_key(&secp), 
+                spend_key.private_key.public_key(&secp), 
                 is_testnet
             ).expect("Couldn't create SilentPayment")
         })
@@ -469,11 +401,11 @@ impl SilentPaymentReceiver {
 pub enum CatiminiReceiver {
     Bip47(Bip47Receiver),
     PrivatePayment(PrivatePaymentReceiver),
-    SilentPayment(SilentPaymentReceiver),
+    SilentPayment(Receiver),
 }
 
 impl CatiminiReceiver {
-    pub fn new_sp(sp: SilentPaymentReceiver) -> Self {
+    pub fn new_sp(sp: Receiver) -> Self {
         Self::SilentPayment(sp)
     }
 
@@ -488,7 +420,7 @@ impl CatiminiReceiver {
     pub fn silent_payment_get_address_no_label(&self) -> Result<String, Error> {
         match self {
             CatiminiReceiver::SilentPayment(b) => {
-                Ok(b.0.get_receiving_address(None).expect("We should always have a no label address"))
+                Ok(b.get_receiving_address())
             },
             _ => { 
                 Err(Error::InvalidProtocol(format!("Expected Silent Payment, got {}", self.get_protocol()))) 
@@ -499,12 +431,12 @@ impl CatiminiReceiver {
     pub fn silent_payment_get_addresses(&mut self) -> Result<HashMap<String, String>, Error> {
         match self {
             CatiminiReceiver::SilentPayment(b) => {
-                let labels = b.0.list_labels();
+                let labels = b.list_labels();
                 let mut result: HashMap<String, String> = HashMap::new();
 
                 for label in labels {
                     // Fetch the address for the label.
-                    match b.0.get_receiving_address(Some(&label)) {
+                    match b.get_receiving_address_for_label(&label) {
                         Ok(address) => {
                             result.insert(label.as_string(), address);
                         },
@@ -522,12 +454,25 @@ impl CatiminiReceiver {
         }
     }
 
-    pub fn silent_payment_derive_receive_keys(&mut self, tweak_data: PublicKey, candidate_pubkeys: Vec<XOnlyPublicKey>) -> Result<HashMap<Label, HashSet<SecretKey>>, Error> 
+    pub fn silent_payment_get_address_with_label(&mut self, label: &str) -> Result<String, Error> {
+        match self {
+            CatiminiReceiver::SilentPayment(b) => {
+                if label == NULL_LABEL.as_string() {
+                    Ok(b.get_receiving_address())
+                } else {
+                    Ok(b.get_receiving_address_for_label(&Label::try_from(label)?)?)
+                }
+            },
+            _ => Err(Error::InvalidProtocol(format!("Expected Silent Payment, got {}", self.get_protocol()))) 
+        }
+    }
+
+    pub fn silent_payment_derive_receive_keys(&mut self, tweak_data: PublicKey, candidate_pubkeys: Vec<XOnlyPublicKey>) -> Result<HashMap<Label, Vec<Scalar>>, Error> 
     {
         match self {
             CatiminiReceiver::SilentPayment(b) => {
-                let result = b.0.scan_transaction(&tweak_data, candidate_pubkeys)?;
-                Ok(result)
+                let key_map = b.scan_transaction_with_labels(&tweak_data, candidate_pubkeys)?;
+                Ok(key_map)
             }
             _ => { 
                 return Err(Error::InvalidProtocol(format!("Expected Silent Payment, got {}", self.get_protocol())));
@@ -550,7 +495,7 @@ mod tests {
     use bitcoin::{util::bip32::{ExtendedPrivKey, Error as Bip32Error}, Network, OutPoint, secp256k1::{SecretKey, PublicKey, Secp256k1}};
     use bitcoin::hashes::hex::FromHex;
 
-    use crate::{CatiminiSender, CatiminiReceiver, CatiminiFren, CatiminiAddress, SilentPaymentSender, SilentPaymentReceiver};
+    use crate::{CatiminiSender, CatiminiFren, CatiminiAddress, SilentPaymentSender, SilentPaymentReceiver};
 
     fn new_master_from_seed(seed: &str) -> Result<ExtendedPrivKey, Bip32Error> {
         println!("seed: {}", seed);
@@ -578,7 +523,7 @@ mod tests {
         let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, true).unwrap();
 
         let label = format!("{:064x}", 1);
-        let bob_address = bob_silent.0.get_receiving_address(Some(&label.try_into().unwrap())).unwrap();
+        let bob_address = bob_silent.0.get_receiving_address_for_label(&label.try_into().unwrap()).unwrap();
         println!("{:?}", bob_address);
 
         // Alice sends Bob money from whatever transaction
@@ -634,7 +579,7 @@ mod tests {
         let mut bob_silent = SilentPaymentReceiver::new(bob_xprv, false).unwrap();
 
         // He gets his default address
-        let bob_address = bob_silent.0.get_receiving_address(None).unwrap();
+        let bob_address = bob_silent.0.get_receiving_address();
 
         // And send it to Alice so that she can pay him
         // Alice registers Bob as a fren
@@ -669,9 +614,6 @@ mod tests {
         let scan_pubkeys = new_silent_payment.get_scanpubkeys();
 
         let ecdh_keys = ecdh(scan_pubkeys); // This is implemented by the signer
-
-        // then we must add the ecdh keys to the builder
-        new_silent_payment.add_ecdh_keys(ecdh_keys).unwrap();
 
         // Now let's finalize the sender to generate keys
         // CatiminiSender takes ownership of the builder and consume it
